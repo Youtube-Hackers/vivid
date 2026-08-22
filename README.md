@@ -17,7 +17,7 @@ A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/ErrorAxolotl/vivid.git
+   git clone https://github.com/Youtube-Hackers/vivid.git
    cd vivid
    ```
 
@@ -36,7 +36,7 @@ A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
    npm start
    ```
 
-The app will be available at `http://localhost:3000`.
+The app will be available at `http://localhost:3067`.
 
 ## Architecture
 
