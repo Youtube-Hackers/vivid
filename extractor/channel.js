@@ -1,0 +1,443 @@
+/*
+ * Vivid - A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
+ * Copyright (C) 2026  TheErrorExe, zUnpaid
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbnailUrlClosest,
+         getThumbnailUrlExact, convertUrlToMobile, convertUrlToDesktop, convertWebpThumbnailToJpg,
+         getVideoThumbnailUrl, getVideoIdFromThumbnailUrl, parseQueryParams, extractInitialData } from './utils.js';
+
+function parseChannelData(data) {
+  const result = {
+    id: '',
+    name: '',
+    handle: '',
+    url: '',
+    iconUrl: '',
+    bannerUrl: '',
+    description: '',
+    subscriberCount: '',
+    videos: [],
+    streams: [],
+    shorts: [],
+    videosContinuationToken: '',
+    streamsContinuationToken: '',
+    shortsContinuationToken: '',
+    videoSortTokens: { newest: '', popular: '', oldest: '' },
+    streamsSortTokens: { newest: '', popular: '', oldest: '' },
+    shortsSortTokens: { newest: '', popular: '', oldest: '' },
+    playlistTabBrowseId: '',
+    playlistTabParams: '',
+    playlists: [],
+    error: '',
+  };
+
+  const metadata = data?.metadata?.channelMetadataRenderer;
+  if (metadata) {
+    result.name = metadata.title || '';
+    result.id = metadata.externalId || '';
+    result.url = `/channel/${result.id}`;
+    result.description = metadata.description || '';
+
+    const vanityUrl = metadata.vanityChannelUrl || '';
+    const atPos = vanityUrl.indexOf('@');
+    if (atPos !== -1) {
+      result.handle = decodeURIComponent(vanityUrl.substring(atPos));
+    }
+  }
+
+  const c4Header = data?.header?.c4TabbedHeaderRenderer;
+  if (c4Header) {
+    result.subscriberCount = getTextFromObject(c4Header.subscriberCountText);
+    result.bannerUrl = getThumbnailUrlExact(c4Header?.banner?.thumbnails, 320);
+    result.iconUrl = getThumbnailUrlClosest(c4Header?.avatar?.thumbnails, 88);
+  } else {
+    const pageHeader = data?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel;
+    if (pageHeader) {
+      result.bannerUrl = getThumbnailUrlExact(pageHeader?.banner?.imageBannerViewModel?.image?.sources, 320);
+      result.iconUrl = getThumbnailUrlClosest(
+        pageHeader?.image?.decoratedAvatarViewModel?.avatar?.avatarViewModel?.image?.sources, 88
+      );
+      const rows = pageHeader?.metadata?.contentMetadataViewModel?.metadataRows || [];
+      if (rows.length > 1) {
+        const parts = rows[1]?.metadataParts || [];
+        if (parts.length >= 1) {
+          result.subscriberCount = parts[0]?.text?.content || '';
+        }
+      }
+    }
+  }
+
+  const tabs = data?.contents?.singleColumnBrowseResultsRenderer?.tabs || [];
+  for (const tab of tabs) {
+    const tabRenderer = tab.tabRenderer;
+    if (!tabRenderer) continue;
+
+    const tabUrl = tabRenderer?.endpoint?.commandMetadata?.webCommandMetadata?.url || '';
+    const isVideosTab = tabUrl.endsWith('/videos');
+    const isStreamsTab = tabUrl.endsWith('/streams');
+    const isShortsTab = tabUrl.endsWith('/shorts');
+    const isPlaylistsTab = tabUrl.endsWith('/playlists');
+
+    if (isPlaylistsTab) {
+      result.playlistTabBrowseId = tabRenderer?.endpoint?.browseEndpoint?.browseId || '';
+      result.playlistTabParams = tabRenderer?.endpoint?.browseEndpoint?.params || '';
+    }
+
+    const richGrid = tabRenderer?.content?.richGridRenderer;
+    if (!richGrid) continue;
+
+    const chips = richGrid?.header?.feedFilterChipBarRenderer?.contents || [];
+    if (chips.length >= 3) {
+      const tokens = chips.map(c =>
+        c?.chipCloudChipRenderer?.navigationEndpoint?.continuationCommand?.token || ''
+      );
+      if (isVideosTab) {
+        result.videoSortTokens = { newest: tokens[0], popular: tokens[1], oldest: tokens[2] };
+      } else if (isStreamsTab) {
+        result.streamsSortTokens = { newest: tokens[0], popular: tokens[1], oldest: tokens[2] };
+      } else if (isShortsTab) {
+        result.shortsSortTokens = { newest: tokens[0], popular: tokens[1], oldest: tokens[2] };
+      }
+    }
+
+    for (const item of richGrid.contents || []) {
+      if (item.continuationItemRenderer) {
+        const token = item.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token || '';
+        if (isStreamsTab) result.streamsContinuationToken = token;
+        else if (isVideosTab) result.videosContinuationToken = token;
+        else if (isShortsTab) result.shortsContinuationToken = token;
+        continue;
+      }
+
+      const richContent = item?.richItemRenderer?.content;
+      if (!richContent) continue;
+
+      const videoRenderer = richContent.compactVideoRenderer || richContent.videoWithContextRenderer || richContent.videoRenderer;
+      if (videoRenderer) {
+        const video = parseSuccinctVideo(videoRenderer);
+        if (isStreamsTab) result.streams.push(video);
+        else if (isShortsTab) result.shorts.push(video);
+        else if (isVideosTab) result.videos.push(video);
+        continue;
+      }
+
+      if (richContent.shortsLockupViewModel && isShortsTab) {
+        const shortsData = richContent.shortsLockupViewModel;
+        const short = parseShortVideo(shortsData, result.name);
+        if (short) result.shorts.push(short);
+      }
+    }
+  }
+
+  return result;
+}
+
+function parseShortVideo(shortsData, channelName) {
+  let videoId = '';
+  if (shortsData?.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId) {
+    videoId = shortsData.onTap.innertubeCommand.reelWatchEndpoint.videoId;
+  }
+  if (!videoId && shortsData?.onTap?.innertubeCommand?.commandMetadata?.webCommandMetadata?.url) {
+    const url = shortsData.onTap.innertubeCommand.commandMetadata.webCommandMetadata.url;
+    const match = url.match(/\/shorts\/([a-zA-Z0-9_-]+)/);
+    if (match) videoId = match[1];
+  }
+
+  const overlay = shortsData.overlayMetadata || {};
+  let thumbnailUrl = '';
+  const sources = shortsData?.thumbnail?.sources || [];
+  if (sources.length > 0) {
+    let originalUrl = sources[0].url || '';
+    originalUrl = convertWebpThumbnailToJpg(originalUrl);
+    const id = getVideoIdFromThumbnailUrl(originalUrl);
+    thumbnailUrl = id ? getVideoThumbnailUrl(id) : originalUrl;
+  }
+
+  return {
+    type: 'video',
+    videoId,
+    url: videoId ? `/watch?v=${videoId}` : '',
+    title: overlay?.primaryText?.content || '',
+    views: overlay?.secondaryText?.content || '',
+    duration: '',
+    author: channelName,
+    thumbnailUrl,
+    isShort: true,
+  };
+}
+
+export async function getChannel(client, urlOrId) {
+  try {
+    if (urlOrId.startsWith('http://') || urlOrId.startsWith('https://') || urlOrId.startsWith('@')) {
+      let url = urlOrId;
+      if (url.startsWith('@')) url = `https://m.youtube.com/${url}`;
+      url = convertUrlToMobile(url);
+
+      const patterns = ['https://m.youtube.com/channel/', 'https://m.youtube.com/c/',
+                        'https://m.youtube.com/user/', 'https://m.youtube.com/@'];
+      let ok = false;
+      for (const pattern of patterns) {
+        if (url.startsWith(pattern)) {
+          const rest = url.substring(pattern.length);
+          const slashIdx = rest.indexOf('/');
+          const base = slashIdx !== -1 ? rest.substring(0, slashIdx) : rest;
+          url = pattern + base + '/videos';
+          ok = true;
+          break;
+        }
+      }
+      if (!ok) {
+        return { error: 'Invalid channel URL: ' + urlOrId };
+      }
+
+      const html = await client.getPage(url);
+      if (!html) return { error: 'Empty response from channel page' };
+      const initialData = extractInitialData(html);
+      if (!initialData) return { error: 'Could not extract ytInitialData' };
+      return parseChannelData(initialData);
+    } else {
+      const data = await client.browse(urlOrId, 'EgZ2aWRlb3PyBgQKAjoA');
+      return parseChannelData(data);
+    }
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+export async function getChannelStreams(client, urlOrId) {
+  try {
+    if (urlOrId.startsWith('http://') || urlOrId.startsWith('https://') || urlOrId.startsWith('@')) {
+      let url = urlOrId;
+      if (url.startsWith('@')) url = `https://m.youtube.com/${url}`;
+      url = convertUrlToMobile(url);
+      const patterns = ['https://m.youtube.com/channel/', 'https://m.youtube.com/c/',
+                        'https://m.youtube.com/user/', 'https://m.youtube.com/@'];
+      for (const pattern of patterns) {
+        if (url.startsWith(pattern)) {
+          const rest = url.substring(pattern.length);
+          const slashIdx = rest.indexOf('/');
+          const base = slashIdx !== -1 ? rest.substring(0, slashIdx) : rest;
+          url = pattern + base + '/streams';
+          break;
+        }
+      }
+      const html = await client.getPage(url);
+      const initialData = extractInitialData(html);
+      if (!initialData) return { error: 'Could not extract ytInitialData' };
+      return parseChannelData(initialData);
+    } else {
+      const data = await client.browse(urlOrId, 'EgdzdHJlYW1z8gYECgJ6AA%3D%3D');
+      return parseChannelData(data);
+    }
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+export async function getChannelShorts(client, urlOrId) {
+  try {
+    if (urlOrId.startsWith('http://') || urlOrId.startsWith('https://') || urlOrId.startsWith('@')) {
+      let url = urlOrId;
+      if (url.startsWith('@')) url = `https://m.youtube.com/${url}`;
+      url = convertUrlToMobile(url);
+      const patterns = ['https://m.youtube.com/channel/', 'https://m.youtube.com/c/',
+                        'https://m.youtube.com/user/', 'https://m.youtube.com/@'];
+      for (const pattern of patterns) {
+        if (url.startsWith(pattern)) {
+          const rest = url.substring(pattern.length);
+          const slashIdx = rest.indexOf('/');
+          const base = slashIdx !== -1 ? rest.substring(0, slashIdx) : rest;
+          url = pattern + base + '/shorts';
+          break;
+        }
+      }
+      const html = await client.getPage(url);
+      const initialData = extractInitialData(html);
+      if (!initialData) return { error: 'Could not extract ytInitialData' };
+      return parseChannelData(initialData);
+    } else {
+      const data = await client.browse(urlOrId, 'EgZzaG9ydHPyBgUKA5oBAA%3D%3D');
+      return parseChannelData(data);
+    }
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+export async function loadMoreChannelItems(client, continuationToken) {
+  try {
+    const data = await client.browse(null, null, continuationToken);
+    const result = { items: [], continuationToken: '' };
+
+    for (const action of data.onResponseReceivedActions || []) {
+      const items = action?.appendContinuationItemsAction?.continuationItems
+        || action?.reloadContinuationItemsCommand?.continuationItems || [];
+
+      for (const item of items) {
+        const content = item?.richItemRenderer?.content;
+        if (content) {
+          const renderer = content.videoWithContextRenderer || content.compactVideoRenderer || content.videoRenderer;
+          if (renderer) {
+            result.items.push(parseSuccinctVideo(renderer));
+            continue;
+          }
+          if (content.shortsLockupViewModel) {
+            result.items.push(parseShortVideo(content.shortsLockupViewModel, ''));
+          }
+        }
+        if (item.compactVideoRenderer) {
+          result.items.push(parseSuccinctVideo(item.compactVideoRenderer));
+        }
+        if (item.continuationItemRenderer) {
+          result.continuationToken =
+            item.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token || '';
+        }
+      }
+    }
+
+    return result;
+  } catch (e) {
+    return { items: [], continuationToken: '', error: e.message };
+  }
+}
+
+export async function loadChannelPlaylists(client, browseId, params) {
+  try {
+    const data = await client.browse(browseId, params);
+    const playlists = [];
+
+    const tabs = data?.contents?.singleColumnBrowseResultsRenderer?.tabs || [];
+    for (const tab of tabs) {
+      const sections = tab?.tabRenderer?.content?.sectionListRenderer?.contents || [];
+      for (const section of sections) {
+        if (section.shelfRenderer) {
+          const categoryName = getTextFromObject(section.shelfRenderer.title);
+          const categoryPlaylists = [];
+          for (const item of section.shelfRenderer?.content?.verticalListRenderer?.items || []) {
+            if (item.compactPlaylistRenderer) {
+              categoryPlaylists.push(parseSuccinctPlaylist(item.compactPlaylistRenderer));
+            }
+          }
+          if (categoryPlaylists.length) playlists.push({ category: categoryName, items: categoryPlaylists });
+        }
+        if (section.itemSectionRenderer) {
+          const items = [];
+          for (const item of section.itemSectionRenderer.contents || []) {
+            if (item.compactPlaylistRenderer) {
+              items.push(parseSuccinctPlaylist(item.compactPlaylistRenderer));
+            }
+          }
+          if (items.length) playlists.push({ category: 'Playlists', items });
+        }
+      }
+    }
+
+    return { playlists };
+  } catch (e) {
+    return { playlists: [], error: e.message };
+  }
+}
+
+export async function loadCommunityPosts(client, channelUrl, continuationToken = null) {
+  try {
+    if (continuationToken) {
+      const data = await client.browseWeb(null, null, continuationToken);
+      return parseCommunityResponse(data, true);
+    }
+
+    const desktopUrl = convertUrlToDesktop(channelUrl) + '/community';
+    const url = desktopUrl.replace('/community', '/posts');
+    const html = await client.getDesktopPage(url);
+    if (!html) return { error: 'Empty response' };
+
+    const initialData = extractInitialData(html);
+    if (!initialData) return { error: 'Could not extract ytInitialData' };
+
+    const tabs = initialData?.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
+    for (const tab of tabs) {
+      const sections = tab?.tabRenderer?.content?.sectionListRenderer?.contents || [];
+      for (const section of sections) {
+        if (section.itemSectionRenderer?.contents) {
+          return parseCommunityItems(section.itemSectionRenderer.contents);
+        }
+      }
+    }
+
+    return { posts: [], continuationToken: '' };
+  } catch (e) {
+    return { posts: [], continuationToken: '', error: e.message };
+  }
+}
+
+function parseCommunityResponse(data, isContinuation) {
+  for (const cmd of data.onResponseReceivedEndpoints || []) {
+    if (cmd.appendContinuationItemsAction?.continuationItems) {
+      return parseCommunityItems(cmd.appendContinuationItemsAction.continuationItems);
+    }
+  }
+  return { posts: [], continuationToken: '' };
+}
+
+function parseCommunityItems(contents) {
+  const result = { posts: [], continuationToken: '' };
+
+  for (const post of contents) {
+    if (post.backstagePostThreadRenderer?.post?.backstagePostRenderer) {
+      const renderer = post.backstagePostThreadRenderer.post.backstagePostRenderer;
+      const communityPost = {
+        message: getTextFromObject(renderer.contentText),
+        authorName: getTextFromObject(renderer.authorText),
+        authorIconUrl: getThumbnailUrlClosest(renderer?.authorThumbnail?.thumbnails, 70),
+        time: getTextFromObject(renderer.publishedTimeText),
+        upvotes: getTextFromObject(renderer.voteCount),
+        imageUrl: '',
+        video: null,
+        poll: null,
+      };
+
+      const imgRenderer = renderer?.backstageAttachment?.backstageImageRenderer;
+      if (imgRenderer?.image?.thumbnails?.length) {
+        communityPost.imageUrl = imgRenderer.image.thumbnails[0].url;
+      }
+
+      if (renderer?.backstageAttachment?.videoRenderer) {
+        communityPost.video = parseSuccinctVideo(renderer.backstageAttachment.videoRenderer);
+      }
+
+      if (renderer?.backstageAttachment?.pollRenderer) {
+        const poll = renderer.backstageAttachment.pollRenderer;
+        communityPost.poll = {
+          totalVotes: getTextFromObject(poll.totalVotes),
+          choices: (poll.choices || []).map(c => getTextFromObject(c.text)),
+        };
+      }
+
+      result.posts.push(communityPost);
+    }
+    if (post.continuationItemRenderer) {
+      result.continuationToken =
+        post.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token || '';
+    }
+  }
+
+  return result;
+}
+
+export default {
+  getChannel, getChannelStreams, getChannelShorts,
+  loadMoreChannelItems, loadChannelPlaylists, loadCommunityPosts
+};
