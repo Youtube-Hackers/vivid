@@ -72,28 +72,38 @@ window.addEventListener('DOMContentLoaded', () => {
     }, 200);
   });
 
-  suggestBox.addEventListener('click', (e) => {
-    if (e.target.classList.contains('suggestion-item')) {
-      searchInput.value = e.target.dataset.q;
-      suggestBox.style.display = 'none';
-      searchForm.dispatchEvent(new Event('submit'));
-    }
-  });
 
   document.addEventListener('click', (e) => {
     if (!searchForm.contains(e.target)) suggestBox.style.display = 'none';
   });
 
-  searchForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    suggestBox.style.display = 'none';
-    const query = searchInput.value.trim();
-    if (query) {
-      navigate(`/results?search_query=${encodeURIComponent(query)}`);
-    }
-  });
+    searchForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      suggestBox.style.display = 'none';
+      const query = searchInput.value.trim();
+      if (query) {
+        navigate(`/results?search_query=${encodeURIComponent(query)}`);
+      }
+    });
 
-  
+    suggestBox.addEventListener('click', (e) => {
+      if (e.target.classList.contains('suggestion-item')) {
+        const query = e.target.dataset.q;
+        searchInput.value = query;
+        suggestBox.style.display = 'none';
+        navigate(`/results?search_query=${encodeURIComponent(query)}`);
+      }
+    });
+
+    document.getElementById('search-btn').addEventListener('click', (e) => {
+      e.preventDefault();
+      const query = searchInput.value.trim();
+      if (query) {
+        suggestBox.style.display = 'none';
+        navigate(`/results?search_query=${encodeURIComponent(query)}`);
+      }
+    });
+
   document.getElementById('logo-link').addEventListener('click', (e) => {
     e.preventDefault();
     navigate('/');

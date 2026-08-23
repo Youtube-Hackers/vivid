@@ -20,10 +20,17 @@ import { getVideo, getStreams, getComments, getCommentReplies, getCaptions, getL
 import { escapeHtml } from '../router.js';
 
 let vjsPlayer = null;
+window.vjsPlayer = null;
 let audioTrackPlayer = null;
 let audioSyncInterval = null;
 let chatInterval = null;
 let sponsorSegments = [];
+
+window.seekVideo = function(seconds) {
+  if (window.vjsPlayer) {
+    window.vjsPlayer.currentTime(seconds);
+  }
+};
 
 const ICONS = {
   thumbUp: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14z"/><path d="M7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg>`,
@@ -47,24 +54,34 @@ function linkifyText(text) {
 }
 
 function linkifyComment(text) {
-  const parts = text.split(/(https?:\/\/[^\s<>"']+)/g);
-  return parts.map((part, i) => {
-    if (i % 2 === 1) {
-      const escapedUrl = part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all;">${escapedUrl}</a>`;
+  text = escapeHtml(text);
+  text = text.replace(/(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/.*[?&]v=)([a-zA-Z0-9_-]{11})/g, (match, videoId) => {
+    return `<a href="javascript:void(0)" onclick="if(vjsPlayer)vjsPlayer.pause();window.location.hash='#/watch?v=${videoId}'" style="color:var(--accent);word-break:break-all;">/watch?v=${videoId}</a>`;
+  });
+
+  text = text.replace(/(\d+:)?(\d{1,2}):(\d{2})(?!\w)/g, (match) => {
+    const parts = match.split(':').filter(p => p);
+    let totalSeconds = 0;
+    if (parts.length === 2) {
+      totalSeconds = parseInt(parts[0]) * 60 + parseInt(parts[1]);
+    } else if (parts.length === 3) {
+      totalSeconds = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
     }
-    const escaped = part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return escaped.replace(/(@[A-Za-z0-9_\-\.]+)/g, handle => {
-      const channelId = handle.slice(1);
-      return `<a href="#/channel/${encodeURIComponent(channelId)}" style="color:var(--accent);">${handle}</a>`;
-    });
-  }).join('');
+    return `<a href="javascript:void(0)" onclick="seekVideo(${totalSeconds})" style="color:var(--accent);">${match}</a>`;
+  });
+
+  text = text.replace(/(https?:\/\/[^\s<>"']+)/g, (url) => {
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all;">${url}</a>`;
+  });
+
+  text = text.replace(/\n/g, '<br>');
+  return text;
 }
 
 export async function renderWatch(app, params) {
   const videoId = params.v;
   const listId = params.list || null;
-
+  const timestamp = parseInt(params.t) || 0;
   if (!videoId) {
     app.innerHTML = '<div class="error-msg">No video ID provided</div>';
     return;
@@ -160,8 +177,18 @@ export async function renderWatch(app, params) {
             ${detailObj.publishDate ? `<span>${escapeHtml(detailObj.publishDate)}</span>` : ''}
           </div>
           <div class="watch-likes">
-            <span class="watch-like-btn">${ICONS.thumbUp}<span>${escapeHtml(String(detailObj.likes || '0'))}</span></span>
-            <span class="watch-like-btn">${ICONS.thumbDown}<span>${escapeHtml(String(detailObj.dislikes || '0'))}</span></span>
+          <span class="watch-like-btn">${ICONS.thumbUp}<span>${escapeHtml(String(detailObj.likes || '0'))}</span></span>
+          <span class="watch-like-btn">${ICONS.thumbDown}<span>${escapeHtml(String(detailObj.dislikes || '0'))}</span></span>
+          <span id="share-btn" class="watch-like-btn" style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="18" cy="5" r="3"></circle>
+          <circle cx="6" cy="12" r="3"></circle>
+          <circle cx="18" cy="19" r="3"></circle>
+          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+          <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+          </svg>
+          <span>Share</span>
+          </span>
           </div>
           ${detailObj.author?.id ? `
             <div class="watch-channel">
@@ -216,7 +243,7 @@ export async function renderWatch(app, params) {
 
   audioTrackPlayer = document.createElement('audio');
 
-  vjsPlayer = videojs('vjs-video', {
+  vjsPlayer = window.vjsPlayer = videojs('vjs-video', {
     fluid: true,
     playbackRates: [0.25, 0.5, 1, 1.25, 1.5, 2],
     controlBar: {
@@ -489,6 +516,50 @@ export async function renderWatch(app, params) {
     vjsPlayer.loop(e.target.checked);
   });
 
+
+  const shareBtn = document.getElementById('share-btn');
+  if (shareBtn) {
+    shareBtn.addEventListener('click', () => {
+      const shareUrl = `${window.location.origin}${window.location.pathname}#/watch?v=${videoId}${listId ? '&list=' + listId : ''}`;
+      const shareText = `Check out: ${detailObj.title}`;
+
+      if (navigator.share) {
+        navigator.share({
+          title: detailObj.title,
+          text: shareText,
+          url: shareUrl
+        }).catch(err => console.log('Error sharing:', err));
+      } else {
+        navigator.clipboard.writeText(shareUrl).then(() => {
+          const originalText = shareBtn.textContent;
+          shareBtn.textContent = 'Copied!';
+          setTimeout(() => {
+            shareBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="18" cy="5" r="3"></circle>
+            <circle cx="6" cy="12" r="3"></circle>
+            <circle cx="18" cy="19" r="3"></circle>
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+            </svg>
+            <span>Share</span>`;
+          }, 2000);
+        });
+      }
+    });
+
+    shareBtn.addEventListener('mouseenter', () => {
+      shareBtn.style.background = 'var(--bg-tertiary)';
+      shareBtn.style.borderColor = 'var(--accent)';
+      shareBtn.style.color = 'var(--accent)';
+    });
+
+    shareBtn.addEventListener('mouseleave', () => {
+      shareBtn.style.background = 'none';
+      shareBtn.style.borderColor = 'var(--border)';
+      shareBtn.style.color = 'var(--text-secondary)';
+    });
+  }
+
   const loadCommentsBtn = document.getElementById('load-comments');
   if (loadCommentsBtn) {
     let commentToken = detailObj.comments?.continuationToken || '';
@@ -635,7 +706,7 @@ function renderComment(c, videoId, isReply = false) {
           ${pinHtml}
           <span class="comment-date" style="font-size:0.72rem;">${escapeHtml(c.publishDate || '')}</span>
         </div>
-        <div class="comment-text">${linkifyComment(c.content || '')}</div>
+        <div class="comment-text" style="overflow-wrap: break-word;">${linkifyComment(c.content || '')}</div>
         <div class="comment-footer">
           ${c.upvotes ? `<span class="comment-stat">${ICONS.thumbUp} ${escapeHtml(c.upvotes)}</span>` : ''}
           ${c.replyCount ? `<span class="comment-stat">${ICONS.comment} ${c.replyCount}</span>` : ''}
