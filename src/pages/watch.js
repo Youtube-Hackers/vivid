@@ -113,7 +113,8 @@ export async function renderWatch(app, params) {
   }
 
   const audioOptions = streamsObj.audioStreams || [];
-  let initialAudioIdx = audioOptions.findIndex(a => a.isOriginal);
+  let initialAudioIdx = audioOptions.findIndex(a => a.isDefault);
+  if (initialAudioIdx === -1) initialAudioIdx = audioOptions.findIndex(a => a.isOriginal);
   if (initialAudioIdx === -1) initialAudioIdx = 0;
 
   let initialQ = qualities.find(q => q.label === '720p') || qualities.find(q => q.label === '360p') || qualities[0];
@@ -353,6 +354,27 @@ export async function renderWatch(app, params) {
       vjsPlayer.currentTime(Math.min(dur, vjsPlayer.currentTime() + 5));
     }
   }
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+    if (e.code === 'KeyK' || e.code === 'Space') {
+      e.preventDefault();
+      if (vjsPlayer.paused()) {
+        vjsPlayer.play();
+      } else {
+        vjsPlayer.pause();
+      }
+    }
+
+    if (e.code === 'KeyF') {
+      e.preventDefault();
+      if (vjsPlayer.isFullscreen()) {
+        vjsPlayer.exitFullscreen();
+      } else {
+        vjsPlayer.requestFullscreen();
+      }
+    }
+  });
   function handleVolumeWheel(e) {
     e.preventDefault();
     const delta = e.deltaY < 0 ? 0.05 : -0.05;

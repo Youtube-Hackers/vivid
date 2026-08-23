@@ -135,10 +135,13 @@ export async function getStreamUrls(client, videoId) {
           let dn = format.audioTrack.displayName || '';
           if (dn.includes('(')) dn = dn.split('(')[0].trim();
           streamInfo.displayName = dn;
-          if (streamInfo.audioTrackId.toLowerCase().includes('original') || 
-              streamInfo.displayName.toLowerCase().includes('original')) {
-            streamInfo.isOriginal = true;
+          if (format.audioTrack.audioIsDefault === true) {
+            streamInfo.isDefault = true;
           }
+          if (streamInfo.audioTrackId.toLowerCase().includes('original') ||
+            streamInfo.displayName.toLowerCase().includes('original')) {
+            streamInfo.isOriginal = true;
+            }
         }
         result.audioStreams.push(streamInfo);
       } else if (mimeType.startsWith('video/')) {

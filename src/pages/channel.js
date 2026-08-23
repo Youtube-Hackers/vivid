@@ -33,11 +33,20 @@ export async function renderChannel(app, params) {
     app.innerHTML = `<div class="error-msg">${escapeHtml(data.error)}</div>`;
     return;
   }
-
+  function linkifyText(text) {
+    const parts = text.split(/(https?:\/\/[^\s<>"']+)/g);
+    return parts.map((part, i) => {
+      if (i % 2 === 1) {
+        const escapedUrl = part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return `<a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all;">${escapedUrl}</a>`;
+      }
+      return part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+    }).join('');
+  }
   let activeTab = 'videos';
   let contToken = data.videosContinuationToken || '';
 
-  const sorts = data.videoSortTokens || {};
+  let sorts = data.videoSortTokens || {};
   
   const subs = JSON.parse(localStorage.getItem('vivid_subs') || '[]');
   const isSubscribed = subs.includes(channelId);
@@ -62,7 +71,7 @@ export async function renderChannel(app, params) {
 
   ${data.description ? `
     <div class="watch-description" id="channel-description" style="margin-bottom:1rem">
-    ${escapeHtml(data.description)}
+    ${linkifyText(data.description)}
     </div>
     ` : ''}
 
@@ -75,9 +84,7 @@ export async function renderChannel(app, params) {
     </div>
 
     <div id="channel-sorts" style="margin-bottom:1rem; display:flex; gap:10px;">
-    ${sorts.newest ? `<button class="sort-btn active" data-token="${sorts.newest}" style="padding:4px 12px; border-radius:16px; border:1px solid var(--border-color); background:var(--bg-card); color:var(--text-main);">Newest</button>` : ''}
-    ${sorts.popular ? `<button class="sort-btn" data-token="${sorts.popular}" style="padding:4px 12px; border-radius:16px; border:1px solid var(--border-color); background:var(--bg-card); color:var(--text-main);">Popular</button>` : ''}
-    ${sorts.oldest ? `<button class="sort-btn" data-token="${sorts.oldest}" style="padding:4px 12px; border-radius:16px; border:1px solid var(--border-color); background:var(--bg-card); color:var(--text-main);">Oldest</button>` : ''}
+    ${renderSortButtons(sorts)}
     </div>
 
     <div class="video-grid" id="channel-content">
@@ -88,43 +95,30 @@ export async function renderChannel(app, params) {
     `;
   document.title = data.name ? `${data.name} - Vivid` : 'Channel - Vivid';
   
-  const sortBtns = app.querySelectorAll('.sort-btn');
+  const sortsContainer = document.getElementById('channel-sorts');
   const content = document.getElementById('channel-content');
   const communityContent = document.getElementById('community-content');
   const loadMoreBtn = document.getElementById('load-more-channel');
 
-  const subBtn = document.getElementById('sub-btn');
-  if (subBtn) {
-    subBtn.addEventListener('click', (e) => {
-      let subsList = JSON.parse(localStorage.getItem('vivid_subs') || '[]');
-      if (subsList.includes(channelId)) {
-        subsList = subsList.filter(id => id !== channelId);
-        e.target.textContent = 'Subscribe';
-      } else {
-        subsList.push(channelId);
-        e.target.textContent = 'Unsubscribe';
-      }
-      localStorage.setItem('vivid_subs', JSON.stringify(subsList));
+  function bindSortBtns() {
+    sortsContainer.querySelectorAll('.sort-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        sortsContainer.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+        if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+        try {
+          const more = await getChannelContinuation(channelId, btn.dataset.token);
+          contToken = more.continuationToken || '';
+          content.innerHTML = (more.items || []).map(v => videoCard(v)).join('');
+          if (contToken && loadMoreBtn) loadMoreBtn.style.display = 'block';
+        } catch (e) {}
+      });
     });
   }
+  bindSortBtns();
 
-  sortBtns.forEach(btn => {
-    btn.addEventListener('click', async () => {
-      sortBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
-      if (loadMoreBtn) loadMoreBtn.style.display = 'none';
-      
-      try {
-        const more = await getChannelContinuation(channelId, btn.dataset.token);
-        contToken = more.continuationToken || '';
-        content.innerHTML = (more.items || []).map(v => videoCard(v)).join('');
-        if (contToken && loadMoreBtn) loadMoreBtn.style.display = 'block';
-      } catch(e) {}
-    });
-  });
 
-  
   const descBox = document.getElementById('channel-description');
   if (descBox) {
     descBox.addEventListener('click', () => descBox.classList.toggle('expanded'));
@@ -141,7 +135,7 @@ export async function renderChannel(app, params) {
       tabs.forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
 
-      document.getElementById('channel-sorts').style.display = ['videos','streams','shorts'].includes(newTab) ? 'flex' : 'none';
+      sortsContainer.style.display = ['videos','streams','shorts'].includes(newTab) ? 'flex' : 'none';
       content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
       content.style.display = newTab === 'community' ? 'none' : 'grid';
       communityContent.style.display = newTab === 'community' ? 'block' : 'none';
@@ -155,16 +149,25 @@ export async function renderChannel(app, params) {
           tabData = await getChannel(channelId);
           contToken = tabData.videosContinuationToken || '';
           content.innerHTML = (tabData.videos || []).map(v => videoCard(v)).join('');
+          sorts = tabData.videoSortTokens || {};
+          sortsContainer.innerHTML = renderSortButtons(sorts);
+          bindSortBtns();
         } else if (newTab === 'streams') {
           const res = await fetch(`/api/v1/channels/${channelId}/streams`);
           tabData = await res.json();
           contToken = tabData.streamsContinuationToken || '';
           content.innerHTML = (tabData.streams || []).map(v => videoCard(v)).join('');
+          sorts = tabData.streamsSortTokens || {};
+          sortsContainer.innerHTML = renderSortButtons(sorts);
+          bindSortBtns();
         } else if (newTab === 'shorts') {
           const res = await fetch(`/api/v1/channels/${channelId}/shorts`);
           tabData = await res.json();
           contToken = tabData.shortsContinuationToken || '';
           content.innerHTML = (tabData.shorts || []).map(v => videoCard(v)).join('');
+          sorts = tabData.shortsSortTokens || {};
+          sortsContainer.innerHTML = renderSortButtons(sorts);
+          bindSortBtns();
         } else if (newTab === 'playlists') {
           tabData = await getChannelPlaylists(channelId);
           contToken = '';
@@ -206,6 +209,15 @@ export async function renderChannel(app, params) {
       }
     });
   }
+}
+
+function renderSortButtons(sorts) {
+  const btnStyle = 'padding:4px 12px; border-radius:16px; border:1px solid var(--border-color); background:var(--bg-card); color:var(--text-main);';
+  return `
+  ${sorts.newest ? `<button class="sort-btn active" data-token="${sorts.newest}" style="${btnStyle}">Newest</button>` : ''}
+  ${sorts.popular ? `<button class="sort-btn" data-token="${sorts.popular}" style="${btnStyle}">Popular</button>` : ''}
+  ${sorts.oldest ? `<button class="sort-btn" data-token="${sorts.oldest}" style="${btnStyle}">Oldest</button>` : ''}
+  `;
 }
 
 function playlistCard(p) {
