@@ -16,23 +16,28 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-const STREAM_CLIENT_CHAIN = [
-  { key: 'VISIONOS_1_03', fetch: (client, videoId) => client.visionOsPlayer(videoId, false) },
-  { key: 'VISIONOS_1_02', fetch: (client, videoId) => client.visionOsPlayer(videoId, true) },
-  { key: 'ANDROID_REEL', fetch: (client, videoId) => client.reelPlayer(videoId) },
-];
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
-function isUsableStreamingData(data) {
-  const status = data?.playabilityStatus?.status || '';
-  if (status !== 'OK') return false;
-  const sd = data?.streamingData;
-  if (!sd) return false;
-  const hasFormats = (sd.formats && sd.formats.length) || (sd.adaptiveFormats && sd.adaptiveFormats.length);
-  return !!(hasFormats || sd.hlsManifestUrl);
+const execFileAsync = promisify(execFile);
+
+// This file will first try to extract with Innertube, if it fails it will try to use yt-dlp and if that also fails it will try to use ANDROID_REEL (currently only returns progressive streams (like the ANDROID client, but i will still use it because i can))
+
+let ytDlpAvailable = null;
+
+async function isYtDlpAvailable() {
+  if (ytDlpAvailable !== null) return ytDlpAvailable;
+  try {
+    await execFileAsync('yt-dlp', ['--version']);
+    ytDlpAvailable = true;
+  } catch {
+    ytDlpAvailable = false;
+  }
+  return ytDlpAvailable;
 }
 
-export async function getStreamUrls(client, videoId) {
-  const result = {
+function buildEmptyResult(videoId) {
+  return {
     videoId,
     playabilityStatus: '',
     playabilityReason: '',
@@ -46,150 +51,269 @@ export async function getStreamUrls(client, videoId) {
     error: '',
     usedClient: '',
   };
+}
 
-  let data = null;
+async function getStreamUrlsViaYtdlp(videoId) {
+  const result = buildEmptyResult(videoId);
+  result.usedClient = 'YTDLP';
+
+  const { stdout } = await execFileAsync('yt-dlp', [
+    '-J',
+    '--no-warnings',
+    '--no-playlist',
+    '--skip-download',
+    `https://www.youtube.com/watch?v=${videoId}`,
+  ], { maxBuffer: 1024 * 1024 * 64 });
+
+  const info = JSON.parse(stdout);
+
+  result.playabilityStatus = 'OK';
+  result.isPlayable = true;
+  result.isLivestream = !!info.is_live;
+  result.duration = info.duration ? Math.round(info.duration * 1000) : 0;
+
+  const formats = (info.formats || []).filter(f => {
+    const proto = f.protocol || '';
+    return proto !== 'm3u8' && proto !== 'm3u8_native' && !(f.url || '').includes('.m3u8');
+  });
+
+  for (const format of formats) {
+    if (!format.url) continue;
+    const hasAudio = format.acodec && format.acodec !== 'none';
+    const hasVideo = format.vcodec && format.vcodec !== 'none';
+    if (!hasAudio && !hasVideo) continue;
+
+    const mimeType = format.ext === 'm4a' || (hasAudio && !hasVideo)
+    ? `audio/${format.audio_ext === 'm4a' || format.ext === 'm4a' ? 'mp4' : format.ext}; codecs="${format.acodec}"`
+    : `video/${format.ext}; codecs="${[format.vcodec, format.acodec].filter(c => c && c !== 'none').join(', ')}"`;
+
+    const streamInfo = {
+      url: format.url,
+      itag: Number(format.format_id) || 0,
+      mimeType,
+      bitrate: Math.round((format.tbr || format.abr || format.vbr || 0) * 1000),
+      contentLength: format.filesize ? String(format.filesize) : (format.filesize_approx ? String(format.filesize_approx) : ''),
+      quality: format.format_note || '',
+      qualityLabel: format.format_note || (format.height ? `${format.height}p` : ''),
+    };
+
+    if (hasAudio && !hasVideo) {
+      streamInfo.audioQuality = format.format_note || '';
+      streamInfo.audioSampleRate = format.asr || '';
+      streamInfo.audioChannels = format.audio_channels || 0;
+      result.audioStreams.push(streamInfo);
+    } else if (hasVideo) {
+      streamInfo.width = format.width || 0;
+      streamInfo.height = format.height || 0;
+      streamInfo.fps = format.fps || 0;
+      if (hasAudio) {
+        result.combinedStreams.push(streamInfo);
+      } else {
+        result.videoStreams.push(streamInfo);
+      }
+    }
+  }
+
+  result.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
+  result.bestAudio = result.audioStreams.find(s => s.mimeType.includes('mp4a') || s.mimeType.includes('mp4'))
+  || result.audioStreams[0] || null;
+  result.bestVideo = result.videoStreams.find(s => s.mimeType.includes('avc1'))
+  || result.videoStreams[0] || null;
+
+  result.qualityMap = {};
+  const resolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
+  for (const stream of result.videoStreams) {
+    if (stream.mimeType.includes('avc1')) {
+      const closest = resolutions.reduce((prev, curr) =>
+      Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
+      );
+      if (!result.qualityMap[closest] || stream.bitrate > result.qualityMap[closest].bitrate) {
+        result.qualityMap[closest] = stream;
+      }
+    }
+  }
+
+  if (!result.audioStreams.length && !result.videoStreams.length && !result.combinedStreams.length) {
+    throw new Error('yt-dlp returned no usable non-HLS formats');
+  }
+
+  return result;
+}
+
+function isUsableStreamingData(data) {
+  const status = data?.playabilityStatus?.status || '';
+  if (status !== 'OK') return false;
+  const sd = data?.streamingData;
+  if (!sd) return false;
+  const hasFormats = (sd.formats && sd.formats.length) || (sd.adaptiveFormats && sd.adaptiveFormats.length);
+  return !!(hasFormats || sd.hlsManifestUrl);
+}
+
+function parseInnertubeResult(data, videoId, usedClient) {
+  const result = buildEmptyResult(videoId);
+  result.usedClient = usedClient;
+
+  result.cpn = data.cpn || '';
+  result.playabilityStatus = data?.playabilityStatus?.status || '';
+  result.playabilityReason = data?.playabilityStatus?.reason || '';
+  result.isPlayable = result.playabilityStatus === 'OK';
+
+  if (!result.isPlayable) {
+    result.error = `Video not playable: ${result.playabilityReason || result.playabilityStatus}`;
+    return result;
+  }
+
+  const streamingData = data?.streamingData;
+  if (!streamingData) {
+    result.error = 'No streaming data available';
+    return result;
+  }
+
+  const allFormats = [
+    ...(streamingData.formats || []),
+    ...(streamingData.adaptiveFormats || []),
+  ];
+
+  for (const format of allFormats) {
+    const url = format.url ? decodeURIComponent(format.url) : '';
+    if (!url) continue;
+
+    const mimeType = format.mimeType || '';
+    const itag = format.itag || 0;
+    const bitrate = format.bitrate || 0;
+    const contentLength = format.contentLength || '';
+    const quality = format.quality || '';
+    const qualityLabel = format.qualityLabel || '';
+    const width = format.width || 0;
+    const height = format.height || 0;
+    const fps = format.fps || 0;
+
+    if (format.targetDurationSec) {
+      result.isLivestream = true;
+    }
+
+    if (format.approxDurationMs) {
+      result.duration = parseInt(format.approxDurationMs, 10);
+    }
+
+    if (format.type === 'FORMAT_STREAM_TYPE_OTF') continue;
+
+    const streamInfo = {
+      url: url + (result.cpn ? `&cpn=${result.cpn}` : ''),
+      itag,
+      mimeType,
+      bitrate,
+      contentLength,
+      quality,
+      qualityLabel,
+    };
+
+    if (mimeType.startsWith('audio/')) {
+      streamInfo.audioQuality = format.audioQuality || '';
+      streamInfo.audioSampleRate = format.audioSampleRate || '';
+      streamInfo.audioChannels = format.audioChannels || 0;
+      if (format.audioTrack) {
+        streamInfo.audioTrackId = format.audioTrack.audioTrackId || '';
+        let dn = format.audioTrack.displayName || '';
+        if (dn.includes('(')) dn = dn.split('(')[0].trim();
+        streamInfo.displayName = dn;
+        if (format.audioTrack.audioIsDefault === true) {
+          streamInfo.isDefault = true;
+        }
+        if (streamInfo.audioTrackId.toLowerCase().includes('original') ||
+          streamInfo.displayName.toLowerCase().includes('original')) {
+          streamInfo.isOriginal = true;
+          }
+      }
+      result.audioStreams.push(streamInfo);
+    } else if (mimeType.startsWith('video/')) {
+      streamInfo.width = width;
+      streamInfo.height = height;
+      streamInfo.fps = fps;
+
+      if (format.audioQuality || (width && height && itag === 18)) {
+        result.combinedStreams.push(streamInfo);
+      } else {
+        result.videoStreams.push(streamInfo);
+      }
+    }
+  }
+
+  if (streamingData.hlsManifestUrl) {
+    result.hlsManifestUrl = streamingData.hlsManifestUrl;
+    result.isLivestream = true;
+  }
+  if (streamingData.dashManifestUrl) {
+    result.dashManifestUrl = streamingData.dashManifestUrl;
+  }
+
+  result.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
+  result.bestAudio = result.audioStreams.find(s => s.mimeType.includes('mp4a'))
+  || result.audioStreams[0] || null;
+
+  result.bestVideo = result.videoStreams.find(s => s.mimeType.includes('avc1'))
+  || result.videoStreams[0] || null;
+
+  result.qualityMap = {};
+  const resolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
+  for (const stream of result.videoStreams) {
+    if (stream.mimeType.includes('avc1')) {
+      const closest = resolutions.reduce((prev, curr) =>
+      Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
+      );
+      if (!result.qualityMap[closest] || stream.bitrate > result.qualityMap[closest].bitrate) {
+        result.qualityMap[closest] = stream;
+      }
+    }
+  }
+
+  return result;
+}
+
+export async function getStreamUrls(client, videoId) {
   let lastError = '';
 
-  for (const attempt of STREAM_CLIENT_CHAIN) {
+  for (const attempt of [
+    { key: 'VISIONOS_1_03', fetch: () => client.visionOsPlayer(videoId, false) },
+       { key: 'VISIONOS_1_02', fetch: () => client.visionOsPlayer(videoId, true) },
+  ]) {
     try {
-      const raw = await attempt.fetch(client, videoId);
+      const raw = await attempt.fetch();
       if (isUsableStreamingData(raw)) {
-        data = raw;
-        result.usedClient = attempt.key;
-        break;
+        return parseInnertubeResult(raw, videoId, attempt.key);
       }
-      data = data || raw;
       lastError = raw?.playabilityStatus?.reason || raw?.playabilityStatus?.status || 'no usable streaming data';
     } catch (e) {
       lastError = e.message;
     }
   }
 
-  if (!data) {
-    result.error = lastError || 'All clients (VISIONOS, VISIONOS_1_02, ANDROID_REEL) failed';
-    return result;
+  if (await isYtDlpAvailable()) {
+    try {
+      return await getStreamUrlsViaYtdlp(videoId);
+    } catch (e) {
+      lastError = e.message;
+    }
+  } else {
+    lastError = 'yt-dlp is not installed';
   }
 
   try {
-    result.cpn = data.cpn || '';
-    result.playabilityStatus = data?.playabilityStatus?.status || '';
-    result.playabilityReason = data?.playabilityStatus?.reason || '';
-    result.isPlayable = result.playabilityStatus === 'OK';
-
-    if (!result.isPlayable) {
-      result.error = `Video not playable: ${result.playabilityReason || result.playabilityStatus}`;
-      return result;
+    const raw = await client.reelPlayer(videoId);
+    if (isUsableStreamingData(raw)) {
+      return parseInnertubeResult(raw, videoId, 'ANDROID_REEL');
     }
-
-    const streamingData = data?.streamingData;
-    if (!streamingData) {
-      result.error = 'No streaming data available';
-      return result;
-    }
-
-    const allFormats = [
-      ...(streamingData.formats || []),
-      ...(streamingData.adaptiveFormats || []),
-    ];
-
-    for (const format of allFormats) {
-      const url = format.url ? decodeURIComponent(format.url) : '';
-      if (!url) continue;
-
-      const mimeType = format.mimeType || '';
-      const itag = format.itag || 0;
-      const bitrate = format.bitrate || 0;
-      const contentLength = format.contentLength || '';
-      const quality = format.quality || '';
-      const qualityLabel = format.qualityLabel || '';
-      const width = format.width || 0;
-      const height = format.height || 0;
-      const fps = format.fps || 0;
-
-      if (format.targetDurationSec) {
-        result.isLivestream = true;
-      }
-
-      if (format.approxDurationMs) {
-        result.duration = parseInt(format.approxDurationMs, 10);
-      }
-
-      if (format.type === 'FORMAT_STREAM_TYPE_OTF') continue;
-
-      const streamInfo = {
-        url: url + (result.cpn ? `&cpn=${result.cpn}` : ''),
-        itag,
-        mimeType,
-        bitrate,
-        contentLength,
-        quality,
-        qualityLabel,
-      };
-
-      if (mimeType.startsWith('audio/')) {
-        streamInfo.audioQuality = format.audioQuality || '';
-        streamInfo.audioSampleRate = format.audioSampleRate || '';
-        streamInfo.audioChannels = format.audioChannels || 0;
-        if (format.audioTrack) {
-          streamInfo.audioTrackId = format.audioTrack.audioTrackId || '';
-          let dn = format.audioTrack.displayName || '';
-          if (dn.includes('(')) dn = dn.split('(')[0].trim();
-          streamInfo.displayName = dn;
-          if (format.audioTrack.audioIsDefault === true) {
-            streamInfo.isDefault = true;
-          }
-          if (streamInfo.audioTrackId.toLowerCase().includes('original') ||
-            streamInfo.displayName.toLowerCase().includes('original')) {
-            streamInfo.isOriginal = true;
-            }
-        }
-        result.audioStreams.push(streamInfo);
-      } else if (mimeType.startsWith('video/')) {
-        streamInfo.width = width;
-        streamInfo.height = height;
-        streamInfo.fps = fps;
-
-        if (format.audioQuality || (width && height && itag === 18)) {
-          result.combinedStreams.push(streamInfo);
-        } else {
-          result.videoStreams.push(streamInfo);
-        }
-      }
-    }
-
-    if (streamingData.hlsManifestUrl) {
-      result.hlsManifestUrl = streamingData.hlsManifestUrl;
-      result.isLivestream = true;
-    }
-    if (streamingData.dashManifestUrl) {
-      result.dashManifestUrl = streamingData.dashManifestUrl;
-    }
-
-    result.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-    result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
-    result.bestAudio = result.audioStreams.find(s => s.mimeType.includes('mp4a'))
-      || result.audioStreams[0] || null;
-
-    result.bestVideo = result.videoStreams.find(s => s.mimeType.includes('avc1'))
-      || result.videoStreams[0] || null;
-
-    result.qualityMap = {};
-    const resolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
-    for (const stream of result.videoStreams) {
-      if (stream.mimeType.includes('avc1')) {
-        const closest = resolutions.reduce((prev, curr) =>
-          Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
-        );
-        if (!result.qualityMap[closest] || stream.bitrate > result.qualityMap[closest].bitrate) {
-          result.qualityMap[closest] = stream;
-        }
-      }
-    }
-
+    lastError = raw?.playabilityStatus?.reason || raw?.playabilityStatus?.status || 'no usable streaming data';
   } catch (e) {
-    result.error = e.message;
+    lastError = e.message;
   }
 
+  const result = buildEmptyResult(videoId);
+  result.error = `All extraction methods (VISIONOS, VISIONOS_1_02, yt-dlp, ANDROID_REEL) failed` +
+  (lastError ? ` (last error: ${lastError})` : '') +
+  `. Check whether your server's IP has been blocked by YouTube, or make sure Vivid is up to date: https://github.com/Youtube-Hackers/vivid`;
   return result;
 }
 
