@@ -205,39 +205,19 @@ import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbn
     };
   }
 
+  async function resolveChannelId(client, input) {
+    if (/^UC[\w-]{22}$/.test(input)) return input;
+    const urlPath = input.replace(/^https?:\/\/[^/]+/, '').replace(/^\/?/, '/');
+    const data = await client.resolveUrl(`https://www.youtube.com${urlPath}`);
+    const id = data?.endpoint?.browseEndpoint?.browseId;
+    if (!id) throw new Error('Could not resolve channel: ' + input);
+    return id;
+  }
+
   export async function getChannel(client, urlOrId) {
     try {
-      if (urlOrId.startsWith('http://') || urlOrId.startsWith('https://') || urlOrId.startsWith('@')) {
-        let url = urlOrId;
-        if (url.startsWith('@')) url = `https://m.youtube.com/${url}`;
-          url = convertUrlToMobile(url);
-
-          const patterns = ['https://m.youtube.com/channel/', 'https://m.youtube.com/c/',
-          'https://m.youtube.com/user/', 'https://m.youtube.com/@'];
-          let ok = false;
-          for (const pattern of patterns) {
-            if (url.startsWith(pattern)) {
-              const rest = url.substring(pattern.length);
-              const slashIdx = rest.indexOf('/');
-              const base = slashIdx !== -1 ? rest.substring(0, slashIdx) : rest;
-              url = pattern + base + '/videos';
-              ok = true;
-              break;
-            }
-          }
-          if (!ok) {
-            return { error: 'Invalid channel URL: ' + urlOrId };
-          }
-
-          const html = await client.getPage(url);
-          if (!html) return { error: 'Empty response from channel page' };
-          const initialData = extractInitialData(html);
-          if (!initialData) return { error: 'Could not extract ytInitialData' };
-          return parseChannelData(initialData);
-      } else {
-        const data = await client.browse(urlOrId, 'EgZ2aWRlb3PyBgQKAjoA');
-        return parseChannelData(data);
-      }
+      const id = await resolveChannelId(client, urlOrId);
+      return parseChannelData(await client.browse(id, 'EgZ2aWRlb3PyBgQKAjoA'));
     } catch (e) {
       return { error: e.message };
     }
@@ -245,29 +225,8 @@ import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbn
 
   export async function getChannelStreams(client, urlOrId) {
     try {
-      if (urlOrId.startsWith('http://') || urlOrId.startsWith('https://') || urlOrId.startsWith('@')) {
-        let url = urlOrId;
-        if (url.startsWith('@')) url = `https://m.youtube.com/${url}`;
-          url = convertUrlToMobile(url);
-          const patterns = ['https://m.youtube.com/channel/', 'https://m.youtube.com/c/',
-          'https://m.youtube.com/user/', 'https://m.youtube.com/@'];
-          for (const pattern of patterns) {
-            if (url.startsWith(pattern)) {
-              const rest = url.substring(pattern.length);
-              const slashIdx = rest.indexOf('/');
-              const base = slashIdx !== -1 ? rest.substring(0, slashIdx) : rest;
-              url = pattern + base + '/streams';
-              break;
-            }
-          }
-          const html = await client.getPage(url);
-          const initialData = extractInitialData(html);
-          if (!initialData) return { error: 'Could not extract ytInitialData' };
-          return parseChannelData(initialData);
-      } else {
-        const data = await client.browse(urlOrId, 'EgdzdHJlYW1z8gYECgJ6AA%3D%3D');
-        return parseChannelData(data);
-      }
+      const id = await resolveChannelId(client, urlOrId);
+      return parseChannelData(await client.browse(id, 'EgdzdHJlYW1z8gYECgJ6AA%3D%3D'));
     } catch (e) {
       return { error: e.message };
     }
@@ -275,29 +234,8 @@ import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbn
 
   export async function getChannelShorts(client, urlOrId) {
     try {
-      if (urlOrId.startsWith('http://') || urlOrId.startsWith('https://') || urlOrId.startsWith('@')) {
-        let url = urlOrId;
-        if (url.startsWith('@')) url = `https://m.youtube.com/${url}`;
-          url = convertUrlToMobile(url);
-          const patterns = ['https://m.youtube.com/channel/', 'https://m.youtube.com/c/',
-          'https://m.youtube.com/user/', 'https://m.youtube.com/@'];
-          for (const pattern of patterns) {
-            if (url.startsWith(pattern)) {
-              const rest = url.substring(pattern.length);
-              const slashIdx = rest.indexOf('/');
-              const base = slashIdx !== -1 ? rest.substring(0, slashIdx) : rest;
-              url = pattern + base + '/shorts';
-              break;
-            }
-          }
-          const html = await client.getPage(url);
-          const initialData = extractInitialData(html);
-          if (!initialData) return { error: 'Could not extract ytInitialData' };
-          return parseChannelData(initialData);
-      } else {
-        const data = await client.browse(urlOrId, 'EgZzaG9ydHPyBgUKA5oBAA%3D%3D');
-        return parseChannelData(data);
-      }
+      const id = await resolveChannelId(client, urlOrId);
+      return parseChannelData(await client.browse(id, 'EgZzaG9ydHPyBgUKA5oBAA%3D%3D'));
     } catch (e) {
       return { error: e.message };
     }

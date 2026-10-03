@@ -25,6 +25,25 @@ let audioTrackPlayer = null;
 let audioSyncInterval = null;
 let chatInterval = null;
 let sponsorSegments = [];
+const MEDIA_ACTIONS = ['play', 'pause', 'seekbackward', 'seekforward', 'seekto', 'nexttrack'];
+let userVolume = 1;
+let userMuted = false;
+
+function stopPlayback() {
+  if (audioSyncInterval) { clearInterval(audioSyncInterval); audioSyncInterval = null; }
+  if (chatInterval) { clearTimeout(chatInterval); chatInterval = null; }
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = null;
+    for (const action of MEDIA_ACTIONS) navigator.mediaSession.setActionHandler(action, null);
+  }
+  if (vjsPlayer) { vjsPlayer.dispose(); vjsPlayer = window.vjsPlayer = null; }
+  if (audioTrackPlayer) {
+    audioTrackPlayer.pause();
+    audioTrackPlayer.removeAttribute('src');
+    audioTrackPlayer.load();
+    audioTrackPlayer = null;
+  }
+}
 
 window.seekVideo = function(seconds) {
   if (window.vjsPlayer) {
@@ -87,8 +106,7 @@ export async function renderWatch(app, params) {
     return;
   }
 
-  if (vjsPlayer) { vjsPlayer.dispose(); vjsPlayer = null; }
-  if (chatInterval) { clearInterval(chatInterval); chatInterval = null; }
+  stopPlayback();
 
   app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
@@ -129,7 +147,15 @@ export async function renderWatch(app, params) {
     }
   }
 
-  const audioOptions = streamsObj.audioStreams || [];
+  const probe = document.createElement('audio');
+  const seenTracks = new Set();
+  const audioOptions = (streamsObj.audioStreams || []).filter(a => {
+    if (!probe.canPlayType(a.mimeType)) return false;
+    const key = `${a.audioTrackId || ''}|${a.displayName || ''}`;
+    if (seenTracks.has(key)) return false;
+    seenTracks.add(key);
+    return true;
+  }).sort((a, b) => (b.isDefault ? 2 : b.isOriginal ? 1 : 0) - (a.isDefault ? 2 : a.isOriginal ? 1 : 0));
   let initialAudioIdx = audioOptions.findIndex(a => a.isDefault);
   if (initialAudioIdx === -1) initialAudioIdx = audioOptions.findIndex(a => a.isOriginal);
   if (initialAudioIdx === -1) initialAudioIdx = 0;
@@ -245,6 +271,7 @@ export async function renderWatch(app, params) {
 
   vjsPlayer = window.vjsPlayer = videojs('vjs-video', {
     fluid: true,
+    html5: { preloadTextTracks: false },
     playbackRates: [0.25, 0.5, 1, 1.25, 1.5, 2],
     controlBar: {
       currentTimeDisplay: true,
@@ -259,7 +286,7 @@ export async function renderWatch(app, params) {
     if (detailObj.liveChatContinuationToken) setupLiveChat(videoId, detailObj.liveChatContinuationToken);
   }
 
-  vjsPlayer.on('ended', () => {
+  const playNext = () => {
     if (document.getElementById('ps-loop').checked) return;
     if (!document.getElementById('ps-autoplay').checked) return;
 
@@ -268,6 +295,16 @@ export async function renderWatch(app, params) {
     const nextId = next.videoId || next.id;
     if (nextId) {
       window.location.hash = `#/watch?v=${nextId}${listId ? '&list=' + listId : ''}`;
+    }
+  };
+  vjsPlayer.on('ended', playNext);
+  audioTrackPlayer.addEventListener('ended', () => {
+    if (!document.hidden) return;
+    if (document.getElementById('ps-loop').checked) {
+      audioTrackPlayer.currentTime = 0;
+      audioTrackPlayer.play().catch(() => {});
+    } else {
+      playNext();
     }
   });
 
@@ -318,9 +355,6 @@ export async function renderWatch(app, params) {
   const volumePanelIdx = vjsPlayer.controlBar.children().indexOf(volumePanel);
   let isSyncing = false;
   let isAudioTrackActive = false;
-  let userVolume = 1;
-  let userMuted = false;
-
   function addCaptions() {
     if (capsObj?.baseLanguages) {
       for (const track of capsObj.baseLanguages) {
@@ -340,13 +374,35 @@ export async function renderWatch(app, params) {
     }
   });
   vjsPlayer.on('pause', () => {
-    if (isAudioTrackActive && audioTrackPlayer.src) {
-      audioTrackPlayer.pause();
-    }
+    if (!isAudioTrackActive || !audioTrackPlayer.src) return;
+    if (document.hidden && !audioTrackPlayer.paused) return;
+    audioTrackPlayer.pause();
   });
+  function handleVisibility() {
+    if (document.hidden || !isAudioTrackActive || audioTrackPlayer.paused || !vjsPlayer.paused()) return;
+    vjsPlayer.currentTime(audioTrackPlayer.currentTime);
+    vjsPlayer.play();
+  }
+  document.addEventListener('visibilitychange', handleVisibility);
   vjsPlayer.on('seeking', () => {
     if (isAudioTrackActive && audioTrackPlayer.src) {
+      audioTrackPlayer.pause();
       audioTrackPlayer.currentTime = vjsPlayer.currentTime();
+    }
+  });
+  vjsPlayer.on('seeked', () => {
+    if (isAudioTrackActive && audioTrackPlayer.src) {
+      audioTrackPlayer.currentTime = vjsPlayer.currentTime();
+      if (!vjsPlayer.paused()) audioTrackPlayer.play().catch(() => {});
+    }
+  });
+  vjsPlayer.on('waiting', () => {
+    if (isAudioTrackActive && audioTrackPlayer.src) audioTrackPlayer.pause();
+  });
+  vjsPlayer.on('playing', () => {
+    if (isAudioTrackActive && audioTrackPlayer.src && audioTrackPlayer.paused) {
+      audioTrackPlayer.currentTime = vjsPlayer.currentTime();
+      audioTrackPlayer.play().catch(() => {});
     }
   });
   vjsPlayer.on('ratechange', () => {
@@ -361,7 +417,7 @@ export async function renderWatch(app, params) {
     userVolume = newVolume;
     userMuted = newMuted;
 
-    if (isAudioTrackActive) {
+    if (isAudioTrackActive && audioTrackPlayer) {
       audioTrackPlayer.volume = newVolume;
       audioTrackPlayer.muted = newMuted;
     }
@@ -381,7 +437,8 @@ export async function renderWatch(app, params) {
       vjsPlayer.currentTime(Math.min(dur, vjsPlayer.currentTime() + 5));
     }
   }
-  document.addEventListener('keydown', (e) => {
+  function handleKey(e) {
+    if (!vjsPlayer) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
     if (e.code === 'KeyK' || e.code === 'Space') {
@@ -401,7 +458,7 @@ export async function renderWatch(app, params) {
         vjsPlayer.requestFullscreen();
       }
     }
-  });
+  }
   function handleVolumeWheel(e) {
     e.preventDefault();
     const delta = e.deltaY < 0 ? 0.05 : -0.05;
@@ -415,30 +472,68 @@ export async function renderWatch(app, params) {
     volumePanelEl.addEventListener('wheel', handleVolumeWheel, { passive: false });
   }
 
+  document.addEventListener('keydown', handleSeekKey);
+  document.addEventListener('keydown', handleKey);
   vjsPlayer.on('dispose', () => {
     document.removeEventListener('keydown', handleSeekKey);
+    document.removeEventListener('keydown', handleKey);
+    document.removeEventListener('visibilitychange', handleVisibility);
     if (volumePanelEl) volumePanelEl.removeEventListener('wheel', handleVolumeWheel);
   });
-  document.addEventListener('keydown', handleSeekKey);
-  vjsPlayer.on('dispose', () => {
-    document.removeEventListener('keydown', handleSeekKey);
-  });
+
+  vjsPlayer.volume(userVolume);
+  vjsPlayer.muted(userMuted);
+
+  if ('mediaSession' in navigator) {
+    const session = navigator.mediaSession;
+    session.metadata = new MediaMetadata({
+      title: detailObj.title || '',
+      artist: detailObj.author?.name || '',
+      artwork: [{
+        src: new URL(proxyImageUrl(`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`), location.href).href,
+        sizes: '480x360',
+        type: 'image/jpeg',
+      }],
+    });
+    const actions = {
+      play: () => {
+        vjsPlayer.play();
+        if (isAudioTrackActive) audioTrackPlayer.play().catch(() => {});
+      },
+      pause: () => {
+        vjsPlayer.pause();
+        if (isAudioTrackActive) audioTrackPlayer.pause();
+      },
+      seekbackward: () => vjsPlayer.currentTime(Math.max(0, vjsPlayer.currentTime() - 10)),
+      seekforward: () => vjsPlayer.currentTime(vjsPlayer.currentTime() + 10),
+      seekto: (d) => vjsPlayer.currentTime(d.seekTime),
+    };
+    const next = nextVideos[0];
+    if (next && (next.videoId || next.id)) {
+      actions.nexttrack = () => {
+        window.location.hash = `#/watch?v=${next.videoId || next.id}${listId ? '&list=' + listId : ''}`;
+      };
+    }
+    for (const [action, handler] of Object.entries(actions)) session.setActionHandler(action, handler);
+  }
 
   if (initialQ) setStream(initialQ, initialQ.type === 'adaptive' ? audioOptions[initialAudioIdx] : null);
 
+  let lastHardSync = 0;
   if (audioSyncInterval) clearInterval(audioSyncInterval);
   audioSyncInterval = setInterval(() => {
     if (!vjsPlayer || vjsPlayer.paused()) return;
     const qIdx = document.getElementById('ps-quality')?.value;
     const q = qualities[qIdx] || initialQ;
     if (q?.type === 'adaptive' && audioTrackPlayer.src && !audioTrackPlayer.paused) {
-      const videoTime = vjsPlayer.currentTime();
-      const audioTime = audioTrackPlayer.currentTime;
-      if (Math.abs(videoTime - audioTime) > 0.2) {
-        audioTrackPlayer.currentTime = videoTime;
+      if (vjsPlayer.seeking() || vjsPlayer.readyState() < 3) return;
+      const drift = Math.abs(audioTrackPlayer.currentTime - vjsPlayer.currentTime());
+      if (drift > 0.4 && Date.now() - lastHardSync > 3000) {
+        audioTrackPlayer.currentTime = vjsPlayer.currentTime();
+        lastHardSync = Date.now();
       }
     }
-  }, 500);
+  }, 1000);
 
   vjsPlayer.on('timeupdate', () => {
     if (!document.getElementById('ps-sponsor')?.checked || !sponsorSegments.length) return;
@@ -466,11 +561,8 @@ export async function renderWatch(app, params) {
         audioTrackPlayer.src = aSrc;
         audioTrackPlayer.load();
       }
-      isSyncing = true;
-      vjsPlayer.muted(true);
       audioTrackPlayer.volume = userVolume;
       audioTrackPlayer.muted = userMuted;
-      isSyncing = false;
     } else {
       isAudioTrackActive = false;
       audioTrackPlayer.pause();
@@ -482,7 +574,6 @@ export async function renderWatch(app, params) {
     }
 
     vjsPlayer.ready(() => {
-      addCaptions();
       vjsPlayer.currentTime(ct);
       if (isAudioTrackActive) {
         audioTrackPlayer.currentTime = ct;
@@ -507,8 +598,10 @@ export async function renderWatch(app, params) {
     const a = audioOptions[e.target.value];
     if (q?.type === 'adaptive') {
       audioTrackPlayer.src = proxyStreamUrl(a.url);
-      audioTrackPlayer.currentTime = vjsPlayer.currentTime();
-      if (!vjsPlayer.paused()) audioTrackPlayer.play();
+      audioTrackPlayer.addEventListener('loadedmetadata', () => {
+        audioTrackPlayer.currentTime = vjsPlayer.currentTime();
+        if (!vjsPlayer.paused()) audioTrackPlayer.play().catch(() => {});
+      }, { once: true });
     }
   });
 
@@ -588,6 +681,8 @@ export async function renderWatch(app, params) {
     });
     loadCommentsBtn.click();
   }
+
+  return stopPlayback;
 }
 
 function attachReplyListeners(videoId) {

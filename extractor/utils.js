@@ -16,6 +16,21 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+export function getAttributedText(obj) {
+  let text = obj?.content || '';
+  const runs = [...(obj?.commandRuns || [])].sort((a, b) => b.startIndex - a.startIndex);
+  for (const run of runs) {
+    let url = run.onTap?.innertubeCommand?.urlEndpoint?.url;
+    if (!url) continue;
+    try {
+      const q = new URL(url).searchParams.get('q');
+      if (q && /^https?:\/\//.test(q)) url = q;
+    } catch {}
+    text = text.slice(0, run.startIndex) + url + text.slice(run.startIndex + run.length);
+  }
+  return text;
+}
+
 export function getTextFromObject(obj, preserveUrls = false) {
   if (!obj) return '';
   if (obj.simpleText) return obj.simpleText;

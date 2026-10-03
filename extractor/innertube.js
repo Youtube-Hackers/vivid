@@ -17,7 +17,7 @@
  */
 
 import fetch from 'node-fetch';
-import { MWEB, ANDROID, ANDROID_REEL, VISIONOS, VISIONOS_1_02, WEB, getInnertubeApiUrl, API_URL, MOBILE_API_URL, DEFAULT_LANG, DEFAULT_COUNTRY, LANG_TO_COUNTRY } from './constants.js';
+import { MWEB, ANDROID, ANDROID_REEL, VISIONOS, WEB, getInnertubeApiUrl, API_URL, MOBILE_API_URL, DEFAULT_LANG, DEFAULT_COUNTRY, LANG_TO_COUNTRY } from './constants.js';
 import { getProxyAgent } from './proxyManager.js';
 
 class InnerTubeClient {
@@ -25,6 +25,23 @@ class InnerTubeClient {
     this.language = options.language || DEFAULT_LANG;
     this.country = options.country || LANG_TO_COUNTRY[options.language] || DEFAULT_COUNTRY;
     this.visitorData = null;
+    this.refreshMwebVersion();
+    setInterval(() => this.refreshMwebVersion(), 6 * 60 * 60 * 1000).unref();
+  }
+
+  async refreshMwebVersion() {
+    try {
+      const fetchArgs = { headers: { 'User-Agent': MWEB.userAgent, 'Accept-Language': 'en' } };
+      const agent = getProxyAgent();
+      if (agent) fetchArgs.agent = agent;
+      const res = await fetch('https://m.youtube.com/', fetchArgs);
+      const html = await res.text();
+      const match = html.match(/"INNERTUBE_CONTEXT_CLIENT_VERSION":"([\d.]+)"/)
+        || html.match(/"clientVersion":"(2\.\d{8}\.\d{2}\.\d{2})"/);
+      if (match) MWEB.clientVersion = match[1];
+    } catch (e) {
+      console.error('[InnerTube] Failed to fetch MWEB version:', e.message);
+    }
   }
 
   setLanguage(langCode) {
@@ -194,6 +211,14 @@ class InnerTubeClient {
 
     return this._post(getInnertubeApiUrl('browse'), body, MWEB);
   }
+  async resolveUrl(url) {
+    const body = {
+      context: this._makeContext(MWEB),
+      url,
+    };
+    return this._post(getInnertubeApiUrl('navigation/resolve_url'), body, MWEB);
+  }
+
   async browseAndroid(browseId, params = null, continuation = null) {
     const body = {
       context: this._makeContext(ANDROID),
@@ -249,8 +274,8 @@ class InnerTubeClient {
     return this._post(url, body, client);
   }
 
-  async visionOsPlayer(videoId, useSecondaryVersion = false) {
-    const client = useSecondaryVersion ? VISIONOS_1_02 : VISIONOS;
+  async visionOsPlayer(videoId) {
+    const client = VISIONOS;
 
     if (!this.visitorData) {
       await this.fetchVisitorData();

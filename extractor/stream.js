@@ -16,24 +16,14 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import { forceYtDlp, isYtDlpAvailable, getYtDlpInfo } from './ytdlp.js';
 
 // This file will first try to extract with Innertube, if it fails it will try to use yt-dlp and if that also fails it will try to use ANDROID_REEL (currently only returns progressive streams (like the ANDROID client, but i will still use it because i can))
 
-let ytDlpAvailable = null;
-
-async function isYtDlpAvailable() {
-  if (ytDlpAvailable !== null) return ytDlpAvailable;
-  try {
-    await execFileAsync('yt-dlp', ['--version']);
-    ytDlpAvailable = true;
-  } catch {
-    ytDlpAvailable = false;
-  }
-  return ytDlpAvailable;
+function pickBestAudio(audioStreams) {
+  return audioStreams.find(s => s.isDefault)
+  || audioStreams.find(s => s.isOriginal)
+  || audioStreams[0] || null;
 }
 
 function buildEmptyResult(videoId) {
@@ -57,15 +47,7 @@ async function getStreamUrlsViaYtdlp(videoId) {
   const result = buildEmptyResult(videoId);
   result.usedClient = 'YTDLP';
 
-  const { stdout } = await execFileAsync('yt-dlp', [
-    '-J',
-    '--no-warnings',
-    '--no-playlist',
-    '--skip-download',
-    `https://www.youtube.com/watch?v=${videoId}`,
-  ], { maxBuffer: 1024 * 1024 * 64 });
-
-  const info = JSON.parse(stdout);
+  const info = await getYtDlpInfo(videoId);
 
   result.playabilityStatus = 'OK';
   result.isPlayable = true;
@@ -79,6 +61,7 @@ async function getStreamUrlsViaYtdlp(videoId) {
 
   for (const format of formats) {
     if (!format.url) continue;
+    if (/drc/i.test(format.format_id || '') || /drc/i.test(format.format_note || '')) continue;
     const hasAudio = format.acodec && format.acodec !== 'none';
     const hasVideo = format.vcodec && format.vcodec !== 'none';
     if (!hasAudio && !hasVideo) continue;
@@ -101,6 +84,11 @@ async function getStreamUrlsViaYtdlp(videoId) {
       streamInfo.audioQuality = format.format_note || '';
       streamInfo.audioSampleRate = format.asr || '';
       streamInfo.audioChannels = format.audio_channels || 0;
+      const note = format.format_note || '';
+      streamInfo.audioTrackId = format.language || '';
+      streamInfo.displayName = note.split(',')[0].trim();
+      if (format.language_preference > 0 || /\(default\)/i.test(note)) streamInfo.isDefault = true;
+      if (/original/i.test(note)) streamInfo.isOriginal = true;
       result.audioStreams.push(streamInfo);
     } else if (hasVideo) {
       streamInfo.width = format.width || 0;
@@ -116,8 +104,7 @@ async function getStreamUrlsViaYtdlp(videoId) {
 
   result.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
   result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
-  result.bestAudio = result.audioStreams.find(s => s.mimeType.includes('mp4a') || s.mimeType.includes('mp4'))
-  || result.audioStreams[0] || null;
+  result.bestAudio = pickBestAudio(result.audioStreams);
   result.bestVideo = result.videoStreams.find(s => s.mimeType.includes('avc1'))
   || result.videoStreams[0] || null;
 
@@ -178,6 +165,7 @@ function parseInnertubeResult(data, videoId, usedClient) {
   for (const format of allFormats) {
     const url = format.url ? decodeURIComponent(format.url) : '';
     if (!url) continue;
+    if (format.isDrc || /[?&]xtags=[^&]*drc/i.test(url)) continue;
 
     const mimeType = format.mimeType || '';
     const itag = format.itag || 0;
@@ -214,17 +202,13 @@ function parseInnertubeResult(data, videoId, usedClient) {
       streamInfo.audioSampleRate = format.audioSampleRate || '';
       streamInfo.audioChannels = format.audioChannels || 0;
       if (format.audioTrack) {
-        streamInfo.audioTrackId = format.audioTrack.audioTrackId || '';
-        let dn = format.audioTrack.displayName || '';
-        if (dn.includes('(')) dn = dn.split('(')[0].trim();
-        streamInfo.displayName = dn;
-        if (format.audioTrack.audioIsDefault === true) {
-          streamInfo.isDefault = true;
-        }
-        if (streamInfo.audioTrackId.toLowerCase().includes('original') ||
-          streamInfo.displayName.toLowerCase().includes('original')) {
+        const track = format.audioTrack;
+        streamInfo.audioTrackId = track.id || track.audioTrackId || '';
+        streamInfo.displayName = track.displayName || '';
+        if (track.audioIsDefault === true) streamInfo.isDefault = true;
+        if (/original/i.test(streamInfo.displayName) || /original/i.test(streamInfo.audioTrackId)) {
           streamInfo.isOriginal = true;
-          }
+        }
       }
       result.audioStreams.push(streamInfo);
     } else if (mimeType.startsWith('video/')) {
@@ -250,8 +234,7 @@ function parseInnertubeResult(data, videoId, usedClient) {
 
   result.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
   result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
-  result.bestAudio = result.audioStreams.find(s => s.mimeType.includes('mp4a'))
-  || result.audioStreams[0] || null;
+  result.bestAudio = pickBestAudio(result.audioStreams);
 
   result.bestVideo = result.videoStreams.find(s => s.mimeType.includes('avc1'))
   || result.videoStreams[0] || null;
@@ -275,9 +258,18 @@ function parseInnertubeResult(data, videoId, usedClient) {
 export async function getStreamUrls(client, videoId) {
   let lastError = '';
 
+  if (forceYtDlp()) {
+    try {
+      return await getStreamUrlsViaYtdlp(videoId);
+    } catch (e) {
+      const result = buildEmptyResult(videoId);
+      result.error = `yt-dlp failed (FORCE-YT-DLP is enabled): ${e.message}`;
+      return result;
+    }
+  }
+
   for (const attempt of [
-    { key: 'VISIONOS_1_03', fetch: () => client.visionOsPlayer(videoId, false) },
-       { key: 'VISIONOS_1_02', fetch: () => client.visionOsPlayer(videoId, true) },
+    { key: 'VISIONOS_1_03', fetch: () => client.visionOsPlayer(videoId) },
   ]) {
     try {
       const raw = await attempt.fetch();
@@ -311,7 +303,7 @@ export async function getStreamUrls(client, videoId) {
   }
 
   const result = buildEmptyResult(videoId);
-  result.error = `All extraction methods (VISIONOS, VISIONOS_1_02, yt-dlp, ANDROID_REEL) failed` +
+  result.error = `All extraction methods (VISIONOS, yt-dlp, ANDROID_REEL) failed` +
   (lastError ? ` (last error: ${lastError})` : '') +
   `. Check whether your server's IP has been blocked by YouTube, or make sure Vivid is up to date: https://github.com/Youtube-Hackers/vivid`;
   return result;

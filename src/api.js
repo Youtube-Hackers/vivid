@@ -67,27 +67,27 @@ export async function getLiveChat(id, continuation) {
 }
 
 export async function getChannel(id) {
-  return fetchJson(`${API_BASE}/channels/${id}`);
+  return fetchJson(`${API_BASE}/channels/${encodeURIComponent(id)}`);
 }
 
 export async function getChannelStreams(id) {
-  return fetchJson(`${API_BASE}/channels/${id}/streams`);
+  return fetchJson(`${API_BASE}/channels/${encodeURIComponent(id)}/streams`);
 }
 
 export async function getChannelShorts(id) {
-  return fetchJson(`${API_BASE}/channels/${id}/shorts`);
+  return fetchJson(`${API_BASE}/channels/${encodeURIComponent(id)}/shorts`);
 }
 
 export async function getChannelPlaylists(id) {
-  return fetchJson(`${API_BASE}/channels/${id}/playlists`);
+  return fetchJson(`${API_BASE}/channels/${encodeURIComponent(id)}/playlists`);
 }
 
 export async function getChannelCommunity(id) {
-  return fetchJson(`${API_BASE}/channels/${id}/community`);
+  return fetchJson(`${API_BASE}/channels/${encodeURIComponent(id)}/community`);
 }
 
 export async function getChannelContinuation(id, token) {
-  return fetchJson(`${API_BASE}/channels/${id}/continuation?token=${encodeURIComponent(token)}`);
+  return fetchJson(`${API_BASE}/channels/${encodeURIComponent(id)}/continuation?token=${encodeURIComponent(token)}`);
 }
 
 export function proxyImageUrl(url) {

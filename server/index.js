@@ -73,7 +73,7 @@ app.get('/api/v1', (req, res) => {
 const distPath = join(__dirname, '..', 'dist');
 app.use(express.static(distPath));
 app.get('*', (req, res) => {
-  if (req.path.startsWith('/api/') || req.path.includes('.')) {
+  if (req.path.startsWith('/api/') || (req.path.includes('.') && !req.path.startsWith('/@'))) {
     return res.status(404).send('Not found');
   }
   

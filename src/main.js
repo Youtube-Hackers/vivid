@@ -25,6 +25,11 @@ import { renderChannel } from './pages/channel.js';
 import { renderPlaylist } from './pages/playlist.js';
 import { getSearchSuggestions } from './api.js';
 
+if (location.pathname !== '/' && !location.hash) {
+  const target = location.pathname + location.search;
+  history.replaceState(null, '', '/#' + target);
+}
+
 route('/', renderHome);
 route('/results', renderSearch);
 route('/watch', renderWatch);

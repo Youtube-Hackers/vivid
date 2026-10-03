@@ -16,7 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbnailUrlExact,
+import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinctPlaylist, getThumbnailUrlExact,
   getThumbnailUrlClosest, getVideoThumbnailUrl, getVideoIdByUrl, getPlaylistIdByUrl,
   convertUrlToMobile, parseQueryParams, getVideoIdFromThumbnailUrl, formatCount, formatWithCommas } from './utils.js';
   import fetch from 'node-fetch';
@@ -139,7 +139,7 @@ import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbn
                 result.title = getTextFromObject(meta.title);
                 result.views = getTextFromObject(meta.viewCountText);
                 if (meta.attributedDescription?.content) {
-                  result.description = meta.attributedDescription.content;
+                  result.description = getAttributedText(meta.attributedDescription);
                 } else {
                   result.description = getTextFromObject(meta.description, true);
                 }
@@ -203,7 +203,7 @@ import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbn
               if (item.slimVideoDescriptionRenderer) {
                 const svdr = item.slimVideoDescriptionRenderer;
                 if (svdr.attributedDescription?.content) {
-                  result.description = svdr.attributedDescription.content;
+                  result.description = getAttributedText(svdr.attributedDescription);
                 } else {
                   result.description = getTextFromObject(svdr.description, true);
                 }
@@ -229,12 +229,13 @@ import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbn
             if (item.expandableVideoDescriptionBodyRenderer) {
               const evdbr = item.expandableVideoDescriptionBodyRenderer;
               if (evdbr.attributedDescriptionBodyText?.content) {
-                result.description = evdbr.attributedDescriptionBodyText.content;
+                result.description = getAttributedText(evdbr.attributedDescriptionBodyText);
               } else if (evdbr.descriptionBodyText) {
                 result.description = getTextFromObject(evdbr.descriptionBodyText, true);
               }
             }
             if (item.videoDescriptionHeaderRenderer) {
+              if (!result.title) result.title = getTextFromObject(item.videoDescriptionHeaderRenderer.title);
               result.publishDate = getTextFromObject(item.videoDescriptionHeaderRenderer.publishDate);
               result.views = getTextFromObject(item.videoDescriptionHeaderRenderer.views);
             }

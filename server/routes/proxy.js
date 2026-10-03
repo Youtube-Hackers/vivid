@@ -20,6 +20,7 @@ import { Router } from 'express';
 import fetch from 'node-fetch';
 import { getProxyAgent } from '../../extractor/proxyManager.js';
 const router = Router();
+const CHUNK_SIZE = 4 * 1024 * 1024;
 
 router.get('/stream', async (req, res) => {
   try {
@@ -38,13 +39,18 @@ router.get('/stream', async (req, res) => {
       return res.status(403).json({ error: 'Domain not allowed' });
     }
 
-    const reqHeaders = {
-      'User-Agent': 'Mozilla/5.0',
-      ...req.headers
-    };
-    delete reqHeaders.host;
+    const reqHeaders = { 'User-Agent': 'Mozilla/5.0', 'Accept-Encoding': 'identity' };
+    const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range || '');
+    if (range) {
+      const start = Number(range[1]);
+      const end = Math.min(range[2] ? Number(range[2]) : Infinity, start + CHUNK_SIZE - 1);
+      reqHeaders.Range = `bytes=${start}-${end}`;
+    }
 
-    const fetchArgs = { headers: reqHeaders };
+    const controller = new AbortController();
+    res.on('close', () => controller.abort());
+
+    const fetchArgs = { headers: reqHeaders, signal: controller.signal };
     const agent = getProxyAgent();
     if (agent) fetchArgs.agent = agent;
 
@@ -56,10 +62,13 @@ router.get('/stream', async (req, res) => {
     for (const h of headersToForward) {
       if (response.headers.get(h)) res.set(h, response.headers.get(h));
     }
+    if (!response.headers.get('accept-ranges')) res.set('accept-ranges', 'bytes');
     res.status(response.status);
 
+    response.body.on('error', () => res.destroy());
     response.body.pipe(res);
   } catch (e) {
+    if (e.name === 'AbortError') return;
     res.status(500).json({ error: e.message });
   }
 });

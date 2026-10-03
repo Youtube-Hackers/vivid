@@ -16,8 +16,9 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import fetch from 'node-fetch';
-import { getProxyAgent } from './proxyManager.js';
+import { getTextFromObject } from './utils.js';
+
+const VIDEO_RENDERERS = ['videoRenderer', 'compactVideoRenderer', 'gridVideoRenderer'];
 
 export async function getTrending(client) {
   const result = {
@@ -26,78 +27,29 @@ export async function getTrending(client) {
     error: '',
   };
 
-  const url = "https://www.youtube.com/youtubei/v1/browse";
-
-  const payload = {
-    context: {
-      client: {
-        clientName: "ANDROID",
-        clientVersion: "21.12.525",
-        osName: "Android",
-        osVersion: "14",
-        androidSdkVersion: 34,
-        hl: "de",
-        gl: "DE",
-        utcOffsetMinutes: 60
-      },
-      user: {
-        lockedSafetyMode: false
-      }
-    },
-    browseId: "FEhype_leaderboard"
-  };
-
-  const headers = {
-    "Content-Type": "application/json",
-    "User-Agent": "com.google.android.youtube/19.51.37 (Linux; U; Android 14; de_DE; Quest 3) gzip",
-    "X-Goog-Api-Format-Version": "2",
-    "Origin": "https://www.youtube.com"
-  };
-
   try {
-    const fetchArgs = {
-      method: 'POST',
-      body: JSON.stringify(payload),
-      headers: headers
+    const data = await client.browseWeb('FEhype_leaderboard');
+    const seen = new Set();
+
+    const add = (video) => {
+      if (!video?.videoId || seen.has(video.videoId)) return;
+      seen.add(video.videoId);
+      result.videos.push(video);
     };
-    const agent = getProxyAgent();
-    if (agent) fetchArgs.agent = agent;
 
-    const response = await fetch(url, fetchArgs);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
-
-    const tabs = data?.contents?.singleColumnBrowseResultsRenderer?.tabs ||
-    data?.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
-
-    for (const tab of tabs) {
-      const sections = tab?.tabRenderer?.content?.sectionListRenderer?.contents || [];
-      for (const section of sections) {
-
-        if (section.itemSectionRenderer) {
-          for (const item of section.itemSectionRenderer.contents || []) {
-
-            if (item.elementRenderer) {
-              const element = item.elementRenderer?.newElement?.type?.componentType;
-              const compact = element?.model?.compactVideoModel?.compactVideoData;
-              if (compact) {
-                const video = parseCompactVideoModel(compact, item.elementRenderer);
-                if (video) result.videos.push(video);
-              }
-            }
-
-            if (item.compactVideoRenderer) {
-              result.videos.push(parseClassic(item.compactVideoRenderer));
-            }
-          }
-        }
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        node.forEach(walk);
+        return;
       }
-    }
-
+      for (const [key, value] of Object.entries(node)) {
+        if (VIDEO_RENDERERS.includes(key) && value?.videoId) add(parseVideoRenderer(value));
+        else if (key === 'lockupViewModel' && value?.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO') add(parseLockup(value));
+        else walk(value);
+      }
+    };
+    walk(data);
   } catch (e) {
     result.error = `[Hype] ${e.message}`;
   }
@@ -105,48 +57,34 @@ export async function getTrending(client) {
   return result;
 }
 
-function parseCompactVideoModel(compact, elementRenderer) {
-  const videoId = compact?.onTap?.innertubeCommand?.watchEndpoint?.videoId;
-  if (!videoId) return null;
-
-  const metadata = compact.videoData?.metadata || {};
-  const thumbnail = compact.videoData?.thumbnail || {};
-
-  const video = {
-    type: 'video',
-    videoId: videoId,
-    url: `/watch?v=${videoId}`,
-    title: metadata.title || '',
-    duration: thumbnail.timestampText || '',
-    author: metadata.byline || '',
-    thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-    views: '',
-    publishDate: '',
-  };
-
-  const accessText = compact.accessibilityText || elementRenderer?.accessibilityText || '';
-  if (accessText) {
-    const parts = accessText.split(' - ');
-    if (parts.length >= 6) {
-      video.views = parts[4];
-      video.publishDate = parts[5];
-    }
-  }
-
-  return video;
-}
-
-function parseClassic(v) {
+function parseVideoRenderer(v) {
   return {
     type: 'video',
     videoId: v.videoId,
     url: `/watch?v=${v.videoId}`,
-    title: v.title?.runs?.[0]?.text || v.title?.simpleText || '',
-    duration: v.lengthText?.simpleText || '',
-    author: v.shortBylineText?.runs?.[0]?.text || '',
-    thumbnailUrl: v.thumbnail?.thumbnails?.[0]?.url || '',
-    views: v.viewCountText?.simpleText || '',
-    publishDate: v.publishedTimeText?.simpleText || '',
+    title: getTextFromObject(v.title),
+    duration: getTextFromObject(v.lengthText),
+    author: getTextFromObject(v.ownerText || v.shortBylineText || v.longBylineText),
+    thumbnailUrl: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+    views: getTextFromObject(v.shortViewCountText || v.viewCountText),
+    publishDate: getTextFromObject(v.publishedTimeText),
+  };
+}
+
+function parseLockup(l) {
+  const meta = l.metadata?.lockupMetadataViewModel;
+  const badges = (l.contentImage?.thumbnailViewModel?.overlays || [])
+    .flatMap(o => o.thumbnailBottomOverlayViewModel?.badges || []);
+  return {
+    type: 'video',
+    videoId: l.contentId,
+    url: `/watch?v=${l.contentId}`,
+    title: meta?.title?.content || '',
+    duration: badges.map(b => b.thumbnailBadgeViewModel?.text).find(Boolean) || '',
+    author: meta?.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts?.[0]?.text?.content || '',
+    thumbnailUrl: `https://i.ytimg.com/vi/${l.contentId}/hqdefault.jpg`,
+    views: '',
+    publishDate: '',
   };
 }
 

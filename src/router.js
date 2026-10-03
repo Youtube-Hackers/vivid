@@ -28,7 +28,9 @@ export function navigate(path) {
 }
 
 export async function handleRoute() {
-  const hash = window.location.hash.slice(1) || '/';
+  let hash = window.location.hash.slice(1) || '/';
+  const channelPath = hash.match(/^\/(@[^/?#]+|(?:c|user)\/[^/?#]+)/);
+  if (channelPath) hash = `/channel/${encodeURIComponent(channelPath[1])}`;
   const app = document.getElementById('app');
 
   if (currentCleanup) {

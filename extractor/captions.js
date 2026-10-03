@@ -19,8 +19,9 @@
 import { getTextFromObject } from './utils.js';
 import fetch from 'node-fetch';
 import { getProxyAgent } from './proxyManager.js';
+import { forceYtDlp, isYtDlpAvailable, getYtDlpInfo } from './ytdlp.js';
 
-export async function getCaptionTracks(client, videoId) {
+async function getCaptionTracksViaInnertube(client, videoId) {
   const result = { baseLanguages: [], translationLanguages: [], error: '' };
   try {
     let data = await client.player(videoId, false);
@@ -50,6 +51,54 @@ export async function getCaptionTracks(client, videoId) {
     }
   } catch (e) { result.error = e.message; }
   return result;
+}
+
+async function getCaptionTracksViaYtdlp(videoId) {
+  const result = { baseLanguages: [], translationLanguages: [], error: '' };
+  const info = await getYtDlpInfo(videoId);
+  const pickUrl = (formats) => (formats.find(f => f.ext === 'json3') || formats[0])?.url || '';
+
+  for (const [code, formats] of Object.entries(info.subtitles || {})) {
+    if (code === 'live_chat') continue;
+    result.baseLanguages.push({
+      name: formats[0]?.name || code,
+      languageCode: code,
+      baseUrl: pickUrl(formats),
+      isTranslatable: false,
+    });
+  }
+
+  for (const [code, formats] of Object.entries(info.automatic_captions || {})) {
+    const name = formats[0]?.name || code;
+    if (!code.endsWith('-orig')) {
+      result.translationLanguages.push({ name, languageCode: code });
+      continue;
+    }
+    const languageCode = code.replace(/-orig$/, '');
+    if (result.baseLanguages.some(t => t.languageCode === languageCode)) continue;
+    result.baseLanguages.push({ name, languageCode, baseUrl: pickUrl(formats), isTranslatable: true });
+  }
+
+  return result;
+}
+
+export async function getCaptionTracks(client, videoId) {
+  if (forceYtDlp()) {
+    try {
+      return await getCaptionTracksViaYtdlp(videoId);
+    } catch (e) {
+      return { baseLanguages: [], translationLanguages: [], error: `yt-dlp failed (FORCE-YT-DLP is enabled): ${e.message}` };
+    }
+  }
+
+  const result = await getCaptionTracksViaInnertube(client, videoId);
+  if (result.baseLanguages.length || !(await isYtDlpAvailable())) return result;
+
+  try {
+    return await getCaptionTracksViaYtdlp(videoId);
+  } catch {
+    return result;
+  }
 }
 
 export async function getCaptionContent(baseUrl, translationLang = '') {

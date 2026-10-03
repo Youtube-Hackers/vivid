@@ -69,18 +69,6 @@ export const VISIONOS = {
   apiUrl: 'https://www.youtube.com/youtubei/v1/',
 };
 
-export const VISIONOS_1_02 = {
-  clientName: 'VISIONOS',
-  clientId: '101',
-  clientVersion: '1.02',
-  deviceMake: 'Apple',
-  deviceModel: 'RealityDevice14,1',
-  osName: 'visionOS',
-  osVersion: '1.02',
-  userAgent: 'com.google.ios.youtube/1.2 (RealityDevice14,1; U; CPU visionOS 1.2 like Mac OS X)',
-  apiUrl: 'https://www.youtube.com/youtubei/v1/',
-};
-
 export const WEB = {
   clientName: 'WEB',
   clientId: '1',
